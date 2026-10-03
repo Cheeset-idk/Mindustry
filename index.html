@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Loading…</title>
+<style>html,body{margin:0;height:100%;background:#16161a;color:#ccc;font:14px sans-serif}</style>
+</head>
+<body>
+<script>
+(function () {
+  // Parts, in order. Must sit in the same folder as this file.
+  var PARTS = [
+    'Game_html.part1',
+    'Game_html.part2',
+    'Game_html.part3',
+    'Game_html.part4',
+    'Game_html.part5'
+  ];
+  var FLUSH_AT = 1 << 20; // write to the document in ~1M-character slices
+
+  // Streams every part, in order, straight into this document, so the
+  // ~118 MB file is never held in memory as one piece. One decoder is used
+  // across all parts so a multi-byte character split between two parts is
+  // still decoded correctly.
+  async function run(sources) {
+    var dec = new TextDecoder('utf-8');
+    var buf = '', opened = false, origTitle = null;
+
+    function flush() {
+      if (!buf) return;
+      if (!opened) { document.open(); opened = true; }
+      document.write(buf);
+      buf = '';
+      if (origTitle === null) origTitle = document.title;
+    }
+
+    for (var i = 0; i < sources.length; i++) {
+      var last = i === sources.length - 1;
+      if (opened && last && origTitle !== null) document.title = origTitle;
+
+      var stream = await sources[i].open();
+      var reader = stream.getReader();
+      var total = sources[i].size || 0, got = 0;
+      for (;;) {
+        var r = await reader.read();
+        if (r.done) break;
+        got += r.value.length;
+        buf += dec.decode(r.value, { stream: true });
+        if (buf.length >= FLUSH_AT) {
+          flush();
+          if (opened && !last) {
+            var frac = total ? got / total : 0;
+            document.title = 'Loading… ' + Math.round(100 * (i + frac) / sources.length) + '%';
+          }
+        }
+      }
+    }
+    buf += dec.decode();
+    flush();
+    if (opened) document.close();
+  }
+
+  function fromUrls() {
+    return PARTS.map(function (name) {
+      return {
+        open: async function () {
+          var res = await fetch(name);
+          if (!res.ok) throw new Error(name + ': HTTP ' + res.status);
+          this.size = +res.headers.get('content-length') || 0;
+          return res.body;
+        }
+      };
+    });
+  }
+
+  // Only used when the browser refuses to read sibling files (file:// pages).
+  function pickFiles() {
+    document.title = 'Select game parts';
+    var wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:12px';
+    var msg = document.createElement('div');
+    msg.textContent = 'Browser blocked auto-loading. Select all ' + PARTS.length + ' Game_html.part files:';
+    var input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    wrap.appendChild(msg);
+    wrap.appendChild(input);
+    document.body.appendChild(wrap);
+    input.onchange = function () {
+      var byName = {};
+      Array.prototype.forEach.call(input.files, function (f) { byName[f.name] = f; });
+      var missing = PARTS.filter(function (n) { return !byName[n]; });
+      if (missing.length) { msg.textContent = 'Missing: ' + missing.join(', '); return; }
+      run(PARTS.map(function (n) {
+        return { size: byName[n].size, open: async function () { return byName[n].stream(); } };
+      })).catch(fail);
+    };
+  }
+
+  function fail(e) {
+    console.error('[loader] ' + (e && e.stack || e));
+    document.title = 'Load failed: ' + (e && e.message || e);
+  }
+
+  // Check the first part is readable before touching the page, so a blocked
+  // file:// load can fall back to the picker without losing anything.
+  var sources = fromUrls();
+  var first = sources[0].open.bind(sources[0]);
+  var ready = first().then(function (stream) {
+    sources[0].open = async function () { return stream; };
+  });
+  ready.then(function () { return run(sources); }, function (e) {
+    if (e instanceof TypeError) pickFiles(); else fail(e);
+  }).catch(fail);
+})();
+</script>
+</body>
+</html>
